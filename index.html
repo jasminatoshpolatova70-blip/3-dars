@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<title>Umumiy Akvarium</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #021a24; }
+  body { background: linear-gradient(180deg, #06384a, #021a24 85%); }
+  canvas { position: fixed; inset: 0; display: block; }
+  .ui { position: fixed; bottom: 10px; font: 12px ui-monospace, Consolas, monospace; color: #8fd8e8; }
+  #info { left: 12px; pointer-events: none; user-select: none; }
+  #info b { color: #ffd166; font-weight: 500; }
+  #add { right: 12px; background: rgba(4,50,66,.8); border: 1px solid rgba(120,220,240,.4);
+         border-radius: 6px; padding: 6px 10px; cursor: pointer; color: #cfF6ff; }
+  #add:hover { border-color: #7de0f5; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="ui" id="info">oynalar: <b id="n">1</b> · baliqlar: <b id="f">0</b> · <span id="role"></span> · bosing = ovqat tashlash</div>
+<button class="ui" id="add" type="button">+ yangi oyna</button>
+<script>
+(function () {
+  var cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  var W = 1, H = 1, dpr = 1;
+  function resize() {
+    dpr = window.devicePixelRatio || 1; W = innerWidth; H = innerHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  addEventListener('resize', resize); resize();
+
+  function origin() {
+    var side = (outerWidth - innerWidth) / 2;
+    return { x: screenX + side, y: screenY + (outerHeight - innerHeight) - side };
+  }
+  function myCenter() { var o = origin(); return { x: o.x + W / 2, y: o.y + H / 2 }; }
+
+  var myId = Math.random().toString(36).slice(2, 10);
+  var peers = {}, fish = [], foods = [];
+  var ch = new BroadcastChannel('akvarium-v1');
+  var WORLD_W = screen.width, WORLD_H = screen.height;
+  var SAVE_KEY = 'akvarium-state-v1', lastSave = 0, saveWarningShown = false;
+
+  function restoreState() {
+    try {
+      var raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return;
+      var saved = JSON.parse(raw);
+      if (!saved || saved.version !== 1 || !Array.isArray(saved.fish) || !Array.isArray(saved.foods)) {
+        console.warn('Akvarium saqlangan holati yaroqsiz, yangi holat boshlanadi.');
+        return;
+      }
+
+      fish = saved.fish.filter(function (a) {
+        return Array.isArray(a) && a.length >= 5 && a.slice(0, 5).every(Number.isFinite);
+      }).map(function (a) {
+        return [a[0], a[1], a[2], a[3], a[4]];
+      });
+      foods = saved.foods.filter(function (f) {
+        return f && Number.isFinite(f.x) && Number.isFinite(f.y) && Number.isFinite(f.t);
+      }).map(function (f) {
+        return { x: f.x, y: f.y, t: f.t };
+      });
+    } catch (error) {
+      console.error('Akvarium holatini localStorage’dan o‘qib bo‘lmadi:', error);
+    }
+  }
+
+  function saveState() {
+    if (!isLeader() || !fish.length) return;
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        fish: fish,
+        foods: foods
+      }));
+      lastSave = Date.now();
+    } catch (error) {
+      if (!saveWarningShown) {
+        console.error('Akvarium holatini localStorage’ga saqlab bo‘lmadi:', error);
+        saveWarningShown = true;
+      }
+    }
+  }
+
+  restoreState();
+
+  function isLeader() {
+    for (var id in peers) if (id < myId) return false;
+    return true;
+  }
+
+  setInterval(function () {
+    var c = myCenter(); ch.postMessage({ t: 'pos', id: myId, x: c.x, y: c.y });
+  }, 30);
+
+  ch.onmessage = function (e) {
+    var m = e.data; if (!m) return;
+    if (m.t === 'pos' && m.id !== myId) peers[m.id] = { x: m.x, y: m.y, seen: performance.now() };
+    else if (m.t === 'bye') delete peers[m.id];
+    else if (m.t === 'fish' && !isLeader()) { fish = m.f; foods = m.d; }
+    else if (m.t === 'food' && isLeader()) foods.push({ x: m.x, y: m.y, t: Date.now() });
+  };
+  addEventListener('beforeunload', function () { ch.postMessage({ t: 'bye', id: myId }); });
+
+  cv.addEventListener('click', function (e) {
+    var o = origin(), x = o.x + e.clientX, y = o.y + e.clientY;
+    if (isLeader()) foods.push({ x: x, y: y, t: Date.now() });
+    else ch.postMessage({ t: 'food', x: x, y: y });
+  });
+  document.getElementById('add').onclick = function (ev) {
+    ev.stopPropagation();
+    window.open(location.href, '_blank', 'popup=yes,width=700,height=500,left=' + (60 + Math.random() * 200) + ',top=' + (60 + Math.random() * 120));
+  };
+
+  function spawn() {
+    fish = [];
+    for (var i = 0; i < 70; i++) {
+      var a = Math.random() * 6.283;
+      fish.push([Math.random() * WORLD_W, Math.random() * WORLD_H, Math.cos(a) * 2, Math.sin(a) * 2, 160 + Math.random() * 60]);
+    }
+  }
+
+  // Faqat "rahbar" oyna simulyatsiya qiladi
+  function simulate() {
+    if (!fish.length) spawn();
+    var now = Date.now();
+    foods = foods.filter(function (f) { return now - f.t < 6000; });
+    var targets = [];
+    for (var id in peers) targets.push(peers[id]);
+    var me = myCenter(); targets.push(me);
+
+    for (var i = 0; i < fish.length; i++) {
+      var a = fish[i], ax = 0, ay = 0, cx = 0, cy = 0, sx = 0, sy = 0, n = 0;
+      for (var j = 0; j < fish.length; j++) {
+        if (i === j) continue;
+        var b = fish[j], dx = b[0] - a[0], dy = b[1] - a[1], d2 = dx * dx + dy * dy;
+        if (d2 < 6400) {
+          n++; ax += b[2]; ay += b[3]; cx += b[0]; cy += b[1];
+          if (d2 < 600) { sx -= dx; sy -= dy; }
+        }
+      }
+      if (n) {
+        a[2] += (ax / n - a[2]) * 0.05 + (cx / n - a[0]) * 0.0008 + sx * 0.004;
+        a[3] += (ay / n - a[3]) * 0.05 + (cy / n - a[1]) * 0.0008 + sy * 0.004;
+      }
+      // Ovqat yoki oynalar markaziga tortilish
+      var best = null, bd = 1e12, strong = false;
+      for (var k = 0; k < foods.length; k++) {
+        var fd = Math.pow(foods[k].x - a[0], 2) + Math.pow(foods[k].y - a[1], 2);
+        if (fd < bd) { bd = fd; best = foods[k]; strong = true; }
+      }
+      if (!best) for (var q = 0; q < targets.length; q++) {
+        var td = Math.pow(targets[q].x - a[0], 2) + Math.pow(targets[q].y - a[1], 2);
+        if (td < bd) { bd = td; best = targets[q]; }
+      }
+      if (best) {
+        var g = strong ? 0.012 : 0.0016;
+        a[2] += (best.x - a[0]) * g * 0.05; a[3] += (best.y - a[1]) * g * 0.05;
+      }
+      var sp = Math.hypot(a[2], a[3]) || 1, mx = strong ? 6 : 4;
+      if (sp > mx) { a[2] *= mx / sp; a[3] *= mx / sp; }
+      if (sp < 1.6) { a[2] *= 1.6 / sp; a[3] *= 1.6 / sp; }
+      a[0] += a[2]; a[1] += a[3];
+      if (a[0] < 0) { a[0] = 0; a[2] = Math.abs(a[2]); } if (a[0] > WORLD_W) { a[0] = WORLD_W; a[2] = -Math.abs(a[2]); }
+      if (a[1] < 0) { a[1] = 0; a[3] = Math.abs(a[3]); } if (a[1] > WORLD_H) { a[1] = WORLD_H; a[3] = -Math.abs(a[3]); }
+    }
+  }
+
+  var fr = 0;
+  function frame() {
+    var now = performance.now(), leader = isLeader();
+    for (var id in peers) if (now - peers[id].seen > 1000) delete peers[id];
+    leader = isLeader();
+
+    if (leader) {
+      simulate();
+      if (++fr % 2 === 0) ch.postMessage({ t: 'fish', f: fish.map(function (a) { return [Math.round(a[0]), Math.round(a[1]), +a[2].toFixed(2), +a[3].toFixed(2), a[4]]; }), d: foods });
+      if (Date.now() - lastSave >= 1000) saveState();
+    } else {
+      for (var i = 0; i < fish.length; i++) { fish[i][0] += fish[i][2]; fish[i][1] += fish[i][3]; }
+    }
+
+    var o = origin();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Ovqat zarralari
+    var wall = Date.now();
+    for (var k = 0; k < foods.length; k++) {
+      var f = foods[k], life = 1 - (wall - f.t) / 6000, fx = f.x - o.x, fy = f.y - o.y;
+      var gr = ctx.createRadialGradient(fx, fy, 0, fx, fy, 22);
+      gr.addColorStop(0, 'rgba(255,220,120,' + life + ')'); gr.addColorStop(1, 'rgba(255,180,60,0)');
+      ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(fx, fy, 22, 0, 6.283); ctx.fill();
+    }
+
+    // Baliqlar
+    for (var j = 0; j < fish.length; j++) {
+      var b = fish[j], x = b[0] - o.x, y = b[1] - o.y;
+      if (x < -30 || y < -30 || x > W + 30 || y > H + 30) continue;
+      var ang = Math.atan2(b[3], b[2]), wag = Math.sin(now / 90 + j) * 0.5;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+      ctx.fillStyle = 'hsla(' + b[4] + ',90%,60%,0.85)';
+      ctx.beginPath(); ctx.ellipse(0, 0, 9, 4, 0, 0, 6.283); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-15, -5 + wag * 4); ctx.lineTo(-15, 5 + wag * 4); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.beginPath(); ctx.arc(5, -1, 1.2, 0, 6.283); ctx.fill();
+      ctx.restore();
+    }
+
+    // Oyna chegarasi: rahbar oyna sariq
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = leader ? 'rgba(255,209,102,.55)' : 'rgba(125,224,245,.3)';
+    ctx.lineWidth = 3; ctx.strokeRect(1.5, 1.5, W - 3, H - 3);
+
+    document.getElementById('n').textContent = Object.keys(peers).length + 1;
+    document.getElementById('f').textContent = fish.length;
+    document.getElementById('role').textContent = leader ? 'rahbar oyna' : 'kuzatuvchi oyna';
+    requestAnimationFrame(frame);
+  }
+  addEventListener('pagehide', saveState);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
